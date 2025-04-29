@@ -1,47 +1,48 @@
 # .github/workflows/auto_post.yml
 name: Auto Post Threads
 
-# 下面兩種觸發：schedule 定時 + workflow_dispatch 手動觸發
 on:
   schedule:
-    # CRON 以 UTC 計算，下面轉換台灣 (UTC+8) 的 01:00、03:00…21:00
-    - cron:  '0 17 * * *'  # TPE 01:00
-    - cron:  '0 19 * * *'  # TPE 03:00
-    - cron:  '0 22 * * *'  # TPE 06:00
-    - cron:  '0 1  * * *'  # TPE 09:00
-    - cron:  '0 4  * * *'  # TPE 12:00
-    - cron:  '0 7  * * *'  # TPE 15:00
-    - cron:  '0 10 * * *'  # TPE 18:00
-    - cron:  '0 13 * * *'  # TPE 21:00
-  workflow_dispatch:      # 手動也能觸發
+    # 以下為 UTC 時間，對應台灣時間每天 01:00、03:00、06:00…21:00
+    - cron: '0 17 * * *'
+    - cron: '0 19 * * *'
+    - cron: '0 22 * * *'
+    - cron: '0 1  * * *'
+    - cron: '0 4  * * *'
+    - cron: '0 7  * * *'
+    - cron: '0 10 * * *'
+    - cron: '0 13 * * *'
+  workflow_dispatch:    # 可手動觸發
 
 jobs:
   post:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 下載程式碼
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: 設定 Python 3.9
+      - name: Setup Python 3.9
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: 安裝相依套件
+      - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install undetected-chromedriver selenium numpy
 
-      - name: 匯入最新爆文到 SQLite
+      - name: Install Chrome & ChromeDriver
         run: |
-          python3 manage_posts.py
-        # 若這步有錯，workflow 就會直接失敗，不往下跑
+          sudo apt-get update
+          sudo apt-get install -y chromium-chromedriver
 
-      - name: 生成貼文並呼叫官方 API 發文
+      - name: Import new posts (manage_posts.py)
+        run: python3 manage_posts.py
+
+      - name: Auto post to Threads (Selenium)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          THREADS_USER_ID:  ${{ secrets.THREADS_USER_ID }}
-          LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
-        run: |
-          python3 threads_auto_poster_api.py
-
+          THREADS_USER:     ${{ secrets.THREADS_USER }}
+          THREADS_PASS:     ${{ secrets.THREADS_PASS }}
+        run: python3 threads_auto_poster.py
