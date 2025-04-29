@@ -2,60 +2,46 @@ name: Auto Post Threads
 
 on:
   schedule:
-    # 每天台北 01,04,07,10,13,16,19,22 點
-    - cron: '0 17 * * *'
-    - cron: '0 20 * * *'
-    - cron: '0 23 * * *'
-    - cron: '0 2  * * *'
-    - cron: '0 5  * * *'
-    - cron: '0 8  * * *'
-    - cron: '0 11 * * *'
-    - cron: '0 14 * * *'
+    - cron:  '0 17,20,23,2,5,8,11,14 * * *'   # 台北 1~22 每隔 3 小時
   workflow_dispatch:
 
 jobs:
   post:
     runs-on: ubuntu-latest
+    env:
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      # ① 安裝 Python + 內建 pip cache
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      # ① 裝 Python（還是要，因為 3.10 最保險；這步其實只花 6–8 秒）
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          cache: pip                       # 🎉 這一行把 pip 下載好的 wheel 打包進 cache
-          cache-dependency-path: requirements.txt
 
-      # ② 再把巨大模型檔也 cache 起來
-      - name: Cache HF & Torch models
+      # ② 先嘗試還原 virtualenv
+      - name: Restore .venv cache
+        id: venv-cache
         uses: actions/cache@v3
         with:
-          path: |
-            ~/.cache/torch
-            ~/.cache/huggingface
-            ~/.cache/sentence_transformers
-          key: ${{ runner.os }}-models-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-models-
+          path: .venv
+          key: ${{ runner.os }}-venv-${{ hashFiles('requirements.txt') }}
 
-      # ③ 安裝 requirements（因為有 wheel cache，這一步只做「解壓＋安裝」，10 秒內搞定）
-      - name: Install dependencies
+      # ③ 如果 cache miss 才建 venv + 安裝
+      - name: Install dependencies (only on cache miss)
+        if: steps.venv-cache.outputs.cache-hit != 'true'
         run: |
-          pip install -r requirements.txt \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-             --progress-bar off
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt --progress-bar off
 
-      # ④ 同步 CSV → SQLite
-      - name: Sync CSV → SQLite
-        run: python3 manage_posts.py
-
-      # ⑤ 生成並發布貼文
-      - name: Generate & publish post via Threads API
+      # ④ 啟動 venv 跑腳本
+      - name: Generate & publish post
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           THREADS_USER_ID:  ${{ secrets.THREADS_USER_ID }}
           LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
-        run: python3 threads_auto_poster.py
+        run: |
+          . .venv/bin/activate
+          python manage_posts.py
+          python threads_auto_poster.py
