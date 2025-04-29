@@ -44,7 +44,9 @@ jobs:
       # ③ 安裝 requirements（因為有 wheel cache，這一步只做「解壓＋安裝」，10 秒內搞定）
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt --progress-bar off
+          pip install -r requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+             --progress-bar off
 
       # ④ 同步 CSV → SQLite
       - name: Sync CSV → SQLite
