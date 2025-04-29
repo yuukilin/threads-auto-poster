@@ -2,45 +2,55 @@ name: Auto Post Threads
 
 on:
   schedule:
-    # UTC → 台北 01,03,06,09,12,15,18,21
+    # 每天台北 01,04,07,10,13,16,19,22 點
     - cron: '0 17 * * *'
-    - cron: '0 19 * * *'
-    - cron: '0 22 * * *'
-    - cron: '0 1  * * *'
-    - cron: '0 4  * * *'
-    - cron: '0 7  * * *'
-    - cron: '0 10 * * *'
-    - cron: '0 13 * * *'
+    - cron: '0 20 * * *'
+    - cron: '0 23 * * *'
+    - cron: '0 2  * * *'
+    - cron: '0 5  * * *'
+    - cron: '0 8  * * *'
+    - cron: '0 11 * * *'
+    - cron: '0 14 * * *'
   workflow_dispatch:
 
 jobs:
   post:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # ① 安裝 Python + 內建 pip cache
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: pip                       # 🎉 這一行把 pip 下載好的 wheel 打包進 cache
+          cache-dependency-path: requirements.txt
 
-      - name: Cache pip
+      # ② 再把巨大模型檔也 cache 起來
+      - name: Cache HF & Torch models
         uses: actions/cache@v3
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          path: |
+            ~/.cache/torch
+            ~/.cache/huggingface
+            ~/.cache/sentence_transformers
+          key: ${{ runner.os }}-models-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-models-
 
+      # ③ 安裝 requirements（因為有 wheel cache，這一步只做「解壓＋安裝」，10 秒內搞定）
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt --progress-bar off
 
+      # ④ 同步 CSV → SQLite
       - name: Sync CSV → SQLite
         run: python3 manage_posts.py
 
+      # ⑤ 生成並發布貼文
       - name: Generate & publish post via Threads API
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
