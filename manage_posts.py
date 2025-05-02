@@ -5,27 +5,34 @@ import sqlite3
 import csv
 import pickle
 import os
+from pathlib import Path
+from huggingface_hub import login as hf_login
 from sentence_transformers import SentenceTransformer
 
-# ———— 參數設定 ———— #
-DB_PATH     = "threads_db.sqlite"  # SQLite 資料庫檔案
-CSV_PATH    = "posts.csv"          # 貼文來源 CSV
-EMBED_MODEL = "all-MiniLM-L6-v2"   # SBERT 模型
-# 支援的編碼順序
-ENCODINGS   = ["utf-8", "big5", "cp950"]
-# ———————————————— #
+# ------------ 參數設定 ------------ #
+DB_PATH      = "threads_db.sqlite"   # SQLite 資料庫檔案
+CSV_PATH     = "posts.csv"           # 貼文來源 CSV
+EMBED_MODEL  = "all-MiniLM-L6-v2"    # SBERT 模型
+MODEL_CACHE  = str(Path.home() / ".cache" / "huggingface")
+ENCODINGS    = ["utf-8", "big5", "cp950"]  # 嘗試的編碼順序
+# ---------------------------------- #
+
+# ---- Hugging Face 認證（避免 403）---- #
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN:
+    hf_login(token=HF_TOKEN)
 
 def initialize_db(db_path: str = DB_PATH):
     """建立資料表（若不存在）"""
     conn = sqlite3.connect(db_path)
-    cur  = conn.cursor()
+    cur = conn.cursor()
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content TEXT NOT NULL UNIQUE,
-        embedding BLOB NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+        CREATE TABLE IF NOT EXISTS posts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content   TEXT NOT NULL UNIQUE,
+            embedding BLOB NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
     conn.close()
@@ -41,9 +48,7 @@ def import_from_csv(db_path: str = DB_PATH, csv_path: str = CSV_PATH):
         print(f"[ERROR] 找不到 {csv_path}，確認放到專案根目錄。")
         return
 
-    # 嘗試不同編碼讀檔
-    reader = None
-    f = None
+    reader, f = None, None
     for enc in ENCODINGS:
         try:
             f = open(csv_path, newline="", encoding=enc, errors="replace")
@@ -54,14 +59,16 @@ def import_from_csv(db_path: str = DB_PATH, csv_path: str = CSV_PATH):
                 break
         except Exception:
             pass
+
     if reader is None:
         print(f"[ERROR] 無法用 {ENCODINGS} 讀取 CSV，檢查檔案格式。")
         return
 
-    # 載入向量模型
-    model = SentenceTransformer(EMBED_MODEL)
-    conn  = sqlite3.connect(db_path)
-    cur   = conn.cursor()
+    # SBERT — 指定快取資料夾
+    model = SentenceTransformer(EMBED_MODEL, cache_folder=MODEL_CACHE)
+
+    conn = sqlite3.connect(db_path)
+    cur  = conn.cursor()
     inserted = skipped = 0
 
     for i, row in enumerate(reader, start=1):
@@ -69,16 +76,15 @@ def import_from_csv(db_path: str = DB_PATH, csv_path: str = CSV_PATH):
         if not content:
             print(f"[WARN] 第 {i} 行空白，跳過。")
             continue
+
         cur.execute("SELECT 1 FROM posts WHERE content = ?", (content,))
         if cur.fetchone():
             skipped += 1
         else:
             try:
                 emb = embed_text(model, content)
-                cur.execute(
-                    "INSERT INTO posts (content, embedding) VALUES (?, ?)",
-                    (content, emb)
-                )
+                cur.execute("INSERT INTO posts (content, embedding) VALUES (?,?)",
+                            (content, emb))
                 inserted += 1
             except Exception as e:
                 print(f"[ERROR] 第 {i} 行匯入失敗：{e}")
