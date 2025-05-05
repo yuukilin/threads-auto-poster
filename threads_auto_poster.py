@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # threads_auto_poster.py
-# DeepSeek 生成 + Threads Graph API 自動發文（格式隨模板多樣化版）
+# DeepSeek 生成 + Threads Graph API 自動發文（多樣化版‧問句機率調整）
 
 import os
 import sys
 import sqlite3
 import pickle
 import random
-import json
 import requests
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -29,7 +28,7 @@ for var in ("DEEPSEEK_KEY", "THREADS_USER_ID", "LONG_LIVED_TOKEN"):
         sys.exit(f"[ERROR] 缺少環境變數 {var}")
 
 # ─────────────────────────────────────────────────────────
-# 嵌入相關：保留舊功能（選填，可用於其他場景）
+# 嵌入相關（舊功能保留，給其他流程用）
 sbert = SentenceTransformer("all-MiniLM-L6-v2")
 
 def _cosine(a, b) -> float:
@@ -37,7 +36,6 @@ def _cosine(a, b) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def get_examples(top_k: int = 3):
-    """舊版保留：從 DB 抽樣貼文作參考，不影響新生成邏輯"""
     conn = sqlite3.connect(DB_PATH)
     cur  = conn.cursor()
     cur.execute("SELECT content, embedding FROM posts")
@@ -54,10 +52,11 @@ def get_examples(top_k: int = 3):
     return [c for _, c in scored[:top_k]]
 # ─────────────────────────────────────────────────────────
 
-# ===== 新增：模板抽樣與 Prompt =====
-RECENT_PATH = "recent.pkl"            # 紀錄最近使用過的 template id 列表 (最多 20)
+# ===== 新增：模板抽樣、Prompt 與問句機率控制 =====
+RECENT_PATH   = "recent.pkl"           # 最近 20 筆 template id
+ENDINGS_PATH  = "recent_endings.pkl"   # 最近 10 筆是否為問句
 
-PROMPT_TEMPLATE = """# Threads 爆文生成器 v4
+PROMPT_TEMPLATE = """# Threads 爆文生成器 v4.1
 
 你是一位 24 歲、嘴砲又樂觀的女性數據分析師，天天在 Threads 衝流量。
 你的任務：**重寫下方 TEMPLATE，生成 1 則全新 Threads 貼文**。
@@ -73,7 +72,7 @@ PROMPT_TEMPLATE = """# Threads 爆文生成器 v4
 3. 可使用破折號「—」或 2 個以內 Emoji 點綴；**句尾不得留「——」「--」**。  
 4. 主題隨機選：腥羶色／爭議／親情／搞笑（單篇只用一類）。  
 5. **三秒鈎子**：首句必須帶強情緒或反差；**首詞不得重複最近 10 篇的首 3 個字**（如：今天、對不起、我是）。  
-6. 結尾用開放式問題或挑釁收尾；**禁止 hashtag、括號附註**。  
+6. 結尾可用 punchline、反轉句號，或開放式問題／挑釁（機率自行評估，**不必每篇都用問句**）；禁止 hashtag、括號附註。  
 7. 至少 50 % 詞彙必須與 TEMPLATE 不同；語感、標點節奏可致敬但不得照抄。  
 8. 只輸出貼文本體，不得多任何說明、標籤、序號。
 
@@ -81,7 +80,7 @@ PROMPT_TEMPLATE = """# Threads 爆文生成器 v4
 """
 
 def pick_template() -> str:
-    """隨機挑 1 行當模板，避開最近 20 次使用過的"""
+    """隨機選 1 行當 Template，避開最近 20 次"""
     conn = sqlite3.connect(DB_PATH)
     cur  = conn.cursor()
     cur.execute("SELECT id, content FROM posts")
@@ -91,31 +90,36 @@ def pick_template() -> str:
     if not rows:
         sys.exit("[ERROR] 資料庫沒有貼文可供抽樣")
 
-    # 讀取最近使用過的 id 列表
-    if os.path.exists(RECENT_PATH):
-        recent = pickle.load(open(RECENT_PATH, "rb"))
-    else:
-        recent = []
+    recent = pickle.load(open(RECENT_PATH, "rb")) if os.path.exists(RECENT_PATH) else []
 
-    pool = [r for r in rows if r[0] not in recent]
-    if not pool:            # 若全部都用過，刷新 recent
-        recent = []
-        pool   = rows
-
+    pool = [r for r in rows if r[0] not in recent] or rows
     tid, tline = random.choice(pool)
 
-    # 更新 recent 列表
+    # 更新 recent
     recent.append(tid)
-    recent = recent[-20:]   # 只保留最近 20 筆
+    recent = recent[-20:]
     pickle.dump(recent, open(RECENT_PATH, "wb"))
-
     return tline.strip()
+
+def ends_with_question(text: str) -> bool:
+    return text.rstrip().endswith("?") or text.rstrip().endswith("？")
+
+def update_endings(is_q: bool):
+    lst = pickle.load(open(ENDINGS_PATH, "rb")) if os.path.exists(ENDINGS_PATH) else []
+    lst.append(is_q)
+    lst = lst[-10:]
+    pickle.dump(lst, open(ENDINGS_PATH, "wb"))
+
+def too_many_questions() -> bool:
+    """檢查最近 3 篇是否全為問句"""
+    lst = pickle.load(open(ENDINGS_PATH, "rb")) if os.path.exists(ENDINGS_PATH) else []
+    return len(lst) >= 3 and all(lst[-3:])
+
 # ========================================================
 
 
 def generate_post() -> str:
-    """生成 1 則符合規格的 Threads 貼文"""
-    template_line = pick_template()             # 先由程式決定要模仿哪一行
+    template_line = pick_template()
     prompt = PROMPT_TEMPLATE.format(template_line=template_line)
 
     payload = {
@@ -130,27 +134,33 @@ def generate_post() -> str:
     headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}",
                "Content-Type":  "application/json"}
 
-    resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"].strip()
+    for _ in range(5):               # 最多嘗試 5 次
+        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
 
-    # 簡易防呆：若 DeepSeek 偷偷多行或超字數，就重生一次（最多 3 次）
-    for _ in range(2):
-        line_cnt = content.count("\n") + 1
-        if line_cnt != template_line.count("\n") + 1 or not (20 <= len(content) <= 120):
-            resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-        else:
-            break
+        # 字數 / 行數 防呆
+        if (content.count("\n") + 1) != (template_line.count("\n") + 1):
+            continue
+        if not (20 <= len(content) <= 120):
+            continue
 
+        # 問句機率控制：若最近 3 篇皆為問句，強制本篇不能再問
+        is_q = ends_with_question(content)
+        if too_many_questions() and is_q:
+            continue
+
+        update_endings(is_q)
+        return content
+
+    # 若多次都不符，只好回傳最後一次結果
+    update_endings(ends_with_question(content))
     return content
 
 
 # ─────────────────────────────────────────────────────────
-# 以下「發布 Threads」與主程式區域【完全未動】
+# 以下 Threads API 與主程式區域「完全未動」
 def post_with_api(text: str):
-    # Step 1：Create container
     url_container = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
     r1 = requests.post(
         url_container,
@@ -166,7 +176,6 @@ def post_with_api(text: str):
     if not container_id:
         sys.exit(f"[ERROR] 取得 container id 失敗：{r1.text}")
 
-    # Step 2：Publish container
     url_publish = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
     r2 = requests.post(
         url_publish,
