@@ -1,198 +1,152 @@
 #!/usr/bin/env python3
-# threads_auto_poster.py
-# DeepSeek 生成 + Threads Graph API 自動發文（多樣化版‧問句機率調整）
+# manage_posts.py  –  勇成專用 Threads 文章匯入工具（修正版）
 
 import os
-import sys
-import sqlite3
+import csv
 import pickle
-import random
-import requests
-import numpy as np
+import sqlite3
+from typing import Optional
+
+try:
+    import chardet  # 建議：pip install chardet
+except ImportError:
+    chardet = None
+
 from sentence_transformers import SentenceTransformer
 
-# ===== 參數設定 =====
-DB_PATH = "threads_db.sqlite"
-
-DEEPSEEK_KEY   = os.getenv("DEEPSEEK_API_KEY")    # DeepSeek Long-Lived Key
-DEEPSEEK_URL   = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
-
-# Threads Graph API
-THREADS_USER_ID  = os.getenv("THREADS_USER_ID")   # 你的 Threads user id
-LONG_LIVED_TOKEN = os.getenv("LONG_LIVED_TOKEN")  # th_exchange_token 換到的 token
-# ====================
-
-for var in ("DEEPSEEK_KEY", "THREADS_USER_ID", "LONG_LIVED_TOKEN"):
-    if not globals()[var]:
-        sys.exit(f"[ERROR] 缺少環境變數 {var}")
-
-# ─────────────────────────────────────────────────────────
-# 嵌入相關（舊功能保留，給其他流程用）
-sbert = SentenceTransformer("all-MiniLM-L6-v2")
-
-def _cosine(a, b) -> float:
-    a = np.asarray(a); b = np.asarray(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-def get_examples(top_k: int = 3):
-    conn = sqlite3.connect(DB_PATH)
-    cur  = conn.cursor()
-    cur.execute("SELECT content, embedding FROM posts")
-    rows = cur.fetchall()
-    conn.close()
-
-    if len(rows) < top_k:
-        sys.exit(f"[ERROR] posts 表少於 {top_k} 筆，請先跑 manage_posts.py")
-
-    sample_rows = random.sample(rows, k=min(len(rows), 10))
-    q_vec       = sbert.encode("隨機取樣查詢")
-    scored      = [(_cosine(q_vec, pickle.loads(blob)), txt) for txt, blob in sample_rows]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in scored[:top_k]]
-# ─────────────────────────────────────────────────────────
-
-# ===== 新增：模板抽樣、Prompt 與問句機率控制 =====
-RECENT_PATH   = "recent.pkl"           # 最近 20 筆 template id
-ENDINGS_PATH  = "recent_endings.pkl"   # 最近 10 筆是否為問句
-
-PROMPT_TEMPLATE = """# Threads 爆文生成器 v4.1
-
-你是一位 24 歲、嘴砲又樂觀的女性數據分析師，天天在 Threads 衝流量。
-你的任務：**重寫下方 TEMPLATE，生成 1 則全新 Threads 貼文**。
-
-【TEMPLATE】
-{template_line}
-【/TEMPLATE】
-
-── 規格 ──────────────────────────
-1. 純繁體中文，可少量中英混雜；嚴禁簡體字。
-2. 行數必須與 TEMPLATE 相同；總字數 20–120。  
-   ‑ 行與行直接換行，禁止任何列表符號、數字編號。  
-3. 可使用破折號「—」或 2 個以內 Emoji 點綴；**句尾不得留「——」「--」**。  
-4. 主題隨機選：腥羶色／爭議／親情／搞笑（單篇只用一類）。  
-5. **三秒鈎子**：首句必須帶強情緒或反差；**首詞不得重複最近 10 篇的首 3 個字**（如：今天、對不起、我是）。  
-6. 結尾可用 punchline、反轉句號，或開放式問題／挑釁（機率自行評估，**不必每篇都用問句**）；禁止 hashtag、括號附註。  
-7. 至少 50 % 詞彙必須與 TEMPLATE 不同；語感、標點節奏可致敬但不得照抄。  
-8. 只輸出貼文本體，不得多任何說明、標籤、序號。
-
-（內部思考：拆解 TEMPLATE 行數與節奏，執行以上規則 → 產出新貼文。思考過程勿輸出）
-"""
-
-def pick_template() -> str:
-    """隨機選 1 行當 Template，避開最近 20 次"""
-    conn = sqlite3.connect(DB_PATH)
-    cur  = conn.cursor()
-    cur.execute("SELECT id, content FROM posts")
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        sys.exit("[ERROR] 資料庫沒有貼文可供抽樣")
-
-    recent = pickle.load(open(RECENT_PATH, "rb")) if os.path.exists(RECENT_PATH) else []
-
-    pool = [r for r in rows if r[0] not in recent] or rows
-    tid, tline = random.choice(pool)
-
-    # 更新 recent
-    recent.append(tid)
-    recent = recent[-20:]
-    pickle.dump(recent, open(RECENT_PATH, "wb"))
-    return tline.strip()
-
-def ends_with_question(text: str) -> bool:
-    return text.rstrip().endswith("?") or text.rstrip().endswith("？")
-
-def update_endings(is_q: bool):
-    lst = pickle.load(open(ENDINGS_PATH, "rb")) if os.path.exists(ENDINGS_PATH) else []
-    lst.append(is_q)
-    lst = lst[-10:]
-    pickle.dump(lst, open(ENDINGS_PATH, "wb"))
-
-def too_many_questions() -> bool:
-    """檢查最近 3 篇是否全為問句"""
-    lst = pickle.load(open(ENDINGS_PATH, "rb")) if os.path.exists(ENDINGS_PATH) else []
-    return len(lst) >= 3 and all(lst[-3:])
-
-# ========================================================
+# ===== 基本參數 ===== #
+DB_PATH     = "threads_db.sqlite"
+CSV_PATH    = "posts.csv"
+EMBED_MODEL = "all-MiniLM-L6-v2"
+FALLBACK_ENCODINGS = ["utf-8-sig", "big5", "cp950", "utf-8"]
+# ==================== #
 
 
-def generate_post() -> str:
-    template_line = pick_template()
-    prompt = PROMPT_TEMPLATE.format(template_line=template_line)
+def detect_encoding(path: str) -> Optional[str]:
+    if chardet:
+        with open(path, "rb") as fh:
+            raw = fh.read(8192)
+        enc = chardet.detect(raw).get("encoding")
+        if enc:
+            return enc.lower()
+    return None
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": "你是 Threads 文案助手，只回傳貼文本體。"},
-            {"role": "user",   "content": prompt}
-        ],
-        "max_tokens": 200,
-        "temperature": 0.9,
-    }
-    headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}",
-               "Content-Type":  "application/json"}
 
-    for _ in range(5):               # 最多嘗試 5 次
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
+def initialize_db(db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS posts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                content    TEXT    NOT NULL UNIQUE,
+                embedding  BLOB    NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
 
-        # 字數 / 行數 防呆
-        if (content.count("\n") + 1) != (template_line.count("\n") + 1):
+
+def embed_text(model: SentenceTransformer, text: str) -> bytes:
+    return pickle.dumps(model.encode(text))
+
+
+def open_csv(path: str):
+    tried = []
+    enc = detect_encoding(path)
+    if enc:
+        tried.append(enc)
+        try:
+            fh = open(path, newline="", encoding=enc)
+            reader = csv.DictReader(fh)
+            if reader.fieldnames and "content" in reader.fieldnames:
+                print(f"[CSV] 偵測編碼：{enc}")
+                return fh, reader
+            fh.close()
+        except UnicodeDecodeError:
+            pass
+
+    for enc in FALLBACK_ENCODINGS:
+        if enc in tried:
             continue
-        if not (20 <= len(content) <= 120):
+        try:
+            fh = open(path, newline="", encoding=enc)
+            reader = csv.DictReader(fh)
+            if reader.fieldnames and "content" in reader.fieldnames:
+                print(f"[CSV] 使用備援編碼：{enc}")
+                return fh, reader
+            fh.close()
+        except UnicodeDecodeError:
             continue
 
-        # 問句機率控制：若最近 3 篇皆為問句，強制本篇不能再問
-        is_q = ends_with_question(content)
-        if too_many_questions() and is_q:
-            continue
-
-        update_endings(is_q)
-        return content
-
-    # 若多次都不符，只好回傳最後一次結果
-    update_endings(ends_with_question(content))
-    return content
+    print(f"[ERROR] 無法判斷 {path} 的正確編碼。")
+    return None, None
 
 
-# ─────────────────────────────────────────────────────────
-# 以下 Threads API 與主程式區域「完全未動」
-def post_with_api(text: str):
-    url_container = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
-    r1 = requests.post(
-        url_container,
-        data={
-            "media_type":  "TEXT",
-            "text":        text,
-            "access_token": LONG_LIVED_TOKEN,
-        },
-        timeout=30
-    )
-    r1.raise_for_status()
-    container_id = r1.json().get("id")
-    if not container_id:
-        sys.exit(f"[ERROR] 取得 container id 失敗：{r1.text}")
+def import_from_csv(
+    db_path: str = DB_PATH,
+    csv_path: str = CSV_PATH,
+    model_name: str = EMBED_MODEL,
+) -> None:
+    if not os.path.isfile(csv_path):
+        print(f"[ERROR] 找不到 {csv_path}，請確認路徑。")
+        return
 
-    url_publish = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
-    r2 = requests.post(
-        url_publish,
-        data={
-            "creation_id":  container_id,
-            "access_token": LONG_LIVED_TOKEN,
-        },
-        timeout=30
-    )
-    r2.raise_for_status()
-    print("[API] 發文成功，Post id =", r2.json().get("id"))
+    fh, reader = open_csv(csv_path)
+    if reader is None:
+        return
+
+    model = SentenceTransformer(model_name)
+    inserted = skipped = 0
+
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        for i, row in enumerate(reader, start=1):
+            content = (row.get("content") or "").strip()
+            if not content:
+                print(f"[WARN] 第 {i} 行空白，已跳過。")
+                continue
+            if cur.execute("SELECT 1 FROM posts WHERE content = ?", (content,)).fetchone():
+                skipped += 1
+                continue
+            try:
+                cur.execute(
+                    "INSERT INTO posts (content, embedding) VALUES (?, ?)",
+                    (content, embed_text(model, content)),
+                )
+                inserted += 1
+            except Exception as e:
+                print(f"[ERROR] 第 {i} 行匯入失敗：{e}")
+
+        conn.commit()  # ←←← 額外手動 commit，確保寫盤
+
+    fh.close()
+    print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆。")
+
+
+def show_last_five(db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, content FROM posts ORDER BY id DESC LIMIT 5"
+        ).fetchall()
+
+    print("\n[CHECK] 最後 5 筆貼文：")
+    for rid, txt in reversed(rows):
+        preview = txt.replace("\n", " ")[:60]
+        print(f"{rid:>5} │ {preview}")
+
+
+def main(db_path: str = DB_PATH, csv_path: str = CSV_PATH) -> None:
+    print("== 開始同步 posts.csv → SQLite ==")
+    initialize_db(db_path)
+    import_from_csv(db_path, csv_path)
+    show_last_five(db_path)
+    print("== 同步完成 ==")
 
 
 if __name__ == "__main__":
-    print("=== 生成貼文 ===")
-    post_text = generate_post()
-    print(post_text, "\n")
+    import sys
 
-    print("=== 發布貼文 ===")
-    post_with_api(post_text)
+    args = sys.argv[1:]
+    db = args[0] if len(args) >= 1 else DB_PATH
+    csv_file = args[1] if len(args) >= 2 else CSV_PATH
+    main(db, csv_file)
