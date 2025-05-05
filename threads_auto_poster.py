@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # threads_auto_poster.py
-# DeepSeek 生成 + Threads Graph API 自動發文
+# DeepSeek 生成 + Threads Graph API 自動發文（格式隨模板多樣化版）
 
 import os
 import sys
 import sqlite3
 import pickle
 import random
+import json
 import requests
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -27,16 +28,16 @@ for var in ("DEEPSEEK_KEY", "THREADS_USER_ID", "LONG_LIVED_TOKEN"):
     if not globals()[var]:
         sys.exit(f"[ERROR] 缺少環境變數 {var}")
 
+# ─────────────────────────────────────────────────────────
+# 嵌入相關：保留舊功能（選填，可用於其他場景）
 sbert = SentenceTransformer("all-MiniLM-L6-v2")
-
 
 def _cosine(a, b) -> float:
     a = np.asarray(a); b = np.asarray(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-
 def get_examples(top_k: int = 3):
-    """隨機抽樣 + 餘弦排序，避免生成貼文千篇一律"""
+    """舊版保留：從 DB 抽樣貼文作參考，不影響新生成邏輯"""
     conn = sqlite3.connect(DB_PATH)
     cur  = conn.cursor()
     cur.execute("SELECT content, embedding FROM posts")
@@ -51,70 +52,71 @@ def get_examples(top_k: int = 3):
     scored      = [(_cosine(q_vec, pickle.loads(blob)), txt) for txt, blob in sample_rows]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [c for _, c in scored[:top_k]]
+# ─────────────────────────────────────────────────────────
+
+# ===== 新增：模板抽樣與 Prompt =====
+RECENT_PATH = "recent.pkl"            # 紀錄最近使用過的 template id 列表 (最多 20)
+
+PROMPT_TEMPLATE = """# Threads 爆文生成器 v4
+
+你是一位 24 歲、嘴砲又樂觀的女性數據分析師，天天在 Threads 衝流量。
+你的任務：**重寫下方 TEMPLATE，生成 1 則全新 Threads 貼文**。
+
+【TEMPLATE】
+{template_line}
+【/TEMPLATE】
+
+── 規格 ──────────────────────────
+1. 純繁體中文，可少量中英混雜；嚴禁簡體字。
+2. 行數必須與 TEMPLATE 相同；總字數 20–120。  
+   ‑ 行與行直接換行，禁止任何列表符號、數字編號。  
+3. 可使用破折號「—」或 2 個以內 Emoji 點綴；**句尾不得留「——」「--」**。  
+4. 主題隨機選：腥羶色／爭議／親情／搞笑（單篇只用一類）。  
+5. **三秒鈎子**：首句必須帶強情緒或反差；**首詞不得重複最近 10 篇的首 3 個字**（如：今天、對不起、我是）。  
+6. 結尾用開放式問題或挑釁收尾；**禁止 hashtag、括號附註**。  
+7. 至少 50 % 詞彙必須與 TEMPLATE 不同；語感、標點節奏可致敬但不得照抄。  
+8. 只輸出貼文本體，不得多任何說明、標籤、序號。
+
+（內部思考：拆解 TEMPLATE 行數與節奏，執行以上規則 → 產出新貼文。思考過程勿輸出）
+"""
+
+def pick_template() -> str:
+    """隨機挑 1 行當模板，避開最近 20 次使用過的"""
+    conn = sqlite3.connect(DB_PATH)
+    cur  = conn.cursor()
+    cur.execute("SELECT id, content FROM posts")
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        sys.exit("[ERROR] 資料庫沒有貼文可供抽樣")
+
+    # 讀取最近使用過的 id 列表
+    if os.path.exists(RECENT_PATH):
+        recent = pickle.load(open(RECENT_PATH, "rb"))
+    else:
+        recent = []
+
+    pool = [r for r in rows if r[0] not in recent]
+    if not pool:            # 若全部都用過，刷新 recent
+        recent = []
+        pool   = rows
+
+    tid, tline = random.choice(pool)
+
+    # 更新 recent 列表
+    recent.append(tid)
+    recent = recent[-20:]   # 只保留最近 20 筆
+    pickle.dump(recent, open(RECENT_PATH, "wb"))
+
+    return tline.strip()
+# ========================================================
 
 
 def generate_post() -> str:
-    examples = get_examples()
-    prompt = """
-請先完整閱讀下方示例，依其風格與長度生成全新 Threads 貼文。
-### 🧨 Threads 爆文生成任務 v3.0
-
-你是一位 24 歲、樂觀嘴砲的女性數據分析師，日日在 Threads 衝流量。  
-目標：**輸出 1 則全新、具有高轉傳／互動潛力的 Threads 貼文**。
-
-──────────────────────────────────
-#### 0. 參考資料庫  
-- 建立 `POOL = [所有資料庫貼文]`  
-- **隨機抽 1 行 `TEMPLATE`，但必須排除最近 10 次使用過的行**（用記憶變數 `RECENT_TEMPLATES` 紀錄；滿 10 即先進先出）。  
-- 解析 `TEMPLATE` 的 **行數、標點、語感節奏** 供致敬。  
-
-<<<DATASET>>>  
-（貼上整份 CSV，每行一貼文）  
-<<<END>>>
-
-──────────────────────────────────
-#### 1. 語言
-- **純繁體中文**，可少量中英混雜；**嚴禁簡體字**。
-
-#### 2. 長度與排版
-- **20–120 字、≤3 行**（可 1 行）。  
-- 行與行直接換行，**禁止任何列表符號或數字編號**。  
-- 可用破折號「—」或 Emoji（最多 2 個）點綴；**嚴禁句尾殘留「——」/「--」**。  
-- **結尾不得出現 hashtag、括號描述或附註**。  
-
-#### 3. 主題（隨機擇 1，單篇僅 1 類）
-- 腥羶色／爭議／親情／搞笑  
-
-#### 4. 禁忌
-- **禁**：宗教歧視、露骨色情、暴力威脅、仇恨言論、造謠、製造恐慌或違法內容。  
-
-#### 5. 爆文寫作技巧（全部必須體現）
-1. **三秒鈎子**：首句給強烈情緒、犀利疑問或反差衝擊。  
-2. **可轉傳性**：Punchline／反轉／自嘲，勾起 @朋友 衝動。  
-3. **互動誘餌**：最後一句用開放式問題或挑釁收尾（**無 hashtag**）。  
-4. **時事暗梗**：可隱晦帶入本週熱點（不寫日期、不貼連結）。  
-5. **視覺節奏**：破折號、Emoji 只為節拍，避免雜亂。  
-
-#### 6. 反重複 & 變形規則
-- **首句不得以「對不起」「我是」開頭**，且不得與最近 10 篇開頭重複超過 3 個字。  
-- **至少 40 % 詞彙必須非 `TEMPLATE` 原句**；同義換詞、拆句、插入時事暗梗皆可。  
-- **行數、標點節奏可致敬，但不可照搬完整句式**。  
-
-#### 7. 輸出格式
-- **僅輸出貼文本體**；不得附加序號、標籤、描述或說明。  
-
-──────────────────────────────────
-🎯 **生成步驟（內化，不得輸出）**
-a. 隨機選 `TEMPLATE`（排除 `RECENT_TEMPLATES`）。  
-b. 拆解 `TEMPLATE` 節奏；重寫並滿足變形規則。  
-c. 檢查字數、行數、首句與重複限制。  
-d. 更新 `RECENT_TEMPLATES`，輸出貼文本體。  
-──────────────────────────────────
-
-
-示例貼文：
-
-""".lstrip() + "\n".join(f"{i}. {txt}" for i, txt in enumerate(examples, 1))
+    """生成 1 則符合規格的 Threads 貼文"""
+    template_line = pick_template()             # 先由程式決定要模仿哪一行
+    prompt = PROMPT_TEMPLATE.format(template_line=template_line)
 
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -127,11 +129,26 @@ d. 更新 `RECENT_TEMPLATES`，輸出貼文本體。
     }
     headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}",
                "Content-Type":  "application/json"}
+
     resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    content = resp.json()["choices"][0]["message"]["content"].strip()
+
+    # 簡易防呆：若 DeepSeek 偷偷多行或超字數，就重生一次（最多 3 次）
+    for _ in range(2):
+        line_cnt = content.count("\n") + 1
+        if line_cnt != template_line.count("\n") + 1 or not (20 <= len(content) <= 120):
+            resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=30)
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            break
+
+    return content
 
 
+# ─────────────────────────────────────────────────────────
+# 以下「發布 Threads」與主程式區域【完全未動】
 def post_with_api(text: str):
     # Step 1：Create container
     url_container = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
