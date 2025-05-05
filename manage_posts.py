@@ -15,9 +15,9 @@ except ImportError:
 from sentence_transformers import SentenceTransformer
 
 # ===== 基本參數 ===== #
-DB_PATH     = "threads_db.sqlite"      # SQLite 資料庫
-CSV_PATH    = "posts.csv"              # 貼文 CSV
-EMBED_MODEL = "all-MiniLM-L6-v2"       # SBERT
+DB_PATH     = "threads_db.sqlite"
+CSV_PATH    = "posts.csv"
+EMBED_MODEL = "all-MiniLM-L6-v2"
 FALLBACK_ENCODINGS = ["utf-8-sig", "big5", "cp950", "utf-8"]
 # ==================== #
 
@@ -117,6 +117,8 @@ def import_from_csv(
             except Exception as e:
                 print(f"[ERROR] 第 {i} 行匯入失敗：{e}")
 
+        conn.commit()  # ←←← 額外手動 commit，確保寫盤
+
     fh.close()
     print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆。")
 
@@ -128,7 +130,7 @@ def show_last_five(db_path: str = DB_PATH) -> None:
         ).fetchall()
 
     print("\n[CHECK] 最後 5 筆貼文：")
-    for rid, txt in reversed(rows):  # 由舊到新方便閱讀
+    for rid, txt in reversed(rows):
         preview = txt.replace("\n", " ")[:60]
         print(f"{rid:>5} │ {preview}")
 
