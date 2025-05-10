@@ -104,4 +104,113 @@ PROMPT_TEMPLATE = """# Threads 爆文生成器 v5
 def generate_post():
     tpl = pick_template()
     base_lines = tpl.count("\n") + 1
-    target = 1 if (base_lines_
+    target = 1 if (base_lines >= 2 and random.random() < 0.4) else base_lines
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是 Threads 文案助手，只回傳貼文本體。"},
+            {"role": "user",   "content": PROMPT_TEMPLATE.format(template=tpl, lines=target)}
+        ],
+        "max_tokens": 200,
+        "temperature": 0.9,
+    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}",
+               "Content-Type":  "application/json"}
+
+    for _ in range(6):
+        r = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=25)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        if (text.count("\n")+1) != target: continue
+        if not (20 <= len(text) <= 120):   continue
+        if too_many_q() and ends_q(text):  continue
+        record_q(ends_q(text))
+        return text
+
+    record_q(ends_q(text))
+    return text
+
+# ---- Token 續命（距到期 ≤7 天才刷） ----
+REFRESH_URL = "https://graph.threads.net/v1.0/refresh_access_token"
+TOKEN_STAMP = BASE_DIR / ".token_stamp"
+
+def need_refresh() -> bool:
+    if not TOKEN_STAMP.exists():
+        return True  # 從未刷新
+    ts = datetime.fromisoformat(TOKEN_STAMP.read_text().strip())
+    return (datetime.now() - ts) > timedelta(days=53)  # 60 - 7
+
+def refresh_token(token: str) -> str:
+    if not need_refresh():
+        return token
+    try:
+        r = requests.get(REFRESH_URL,
+                         params={"grant_type": "ig_refresh_token",
+                                 "access_token": token},
+                         timeout=10)
+        r.raise_for_status()
+        new_tok = r.json().get("access_token")
+        if new_tok and new_tok != token:
+            set_key(ENV_FILE, "LONG_LIVED_TOKEN", new_tok)
+            TOKEN_STAMP.write_text(datetime.now().isoformat(timespec="seconds"))
+            print("[TOKEN] 已自動續期 +60 天")
+            return new_tok
+    except Exception as e:
+        print(f"[WARN] token 續期失敗：{e}")
+    return token
+
+# ---- 可選 Quota 檢查 ----
+def quota_ok(token: str) -> bool:
+    if not CHECK_QUOTA:
+        return True
+    try:
+        url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publishing_limit"
+        r = requests.get(url, params={"access_token": token}, timeout=8)
+        r.raise_for_status()
+        used = r.json().get("quota_usage", 0)
+        return used < 250
+    except Exception as e:
+        print(f"[WARN] quota 查詢失敗：{e}")
+        return True  # 查不到就直接貼
+
+# ---- 發文 ----
+def post_thread(text: str, token: str):
+    # container
+    url_container = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+    r1 = requests.post(url_container, data={
+        "media_type":  "TEXT",
+        "text":        text,
+        "access_token": token,
+    }, timeout=25)
+    r1.raise_for_status()
+    cid = r1.json().get("id") or sys.exit(f"[ERROR] container 失敗：{r1.text}")
+
+    # publish
+    url_publish = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
+    r2 = requests.post(url_publish, data={
+        "creation_id":  cid,
+        "access_token": token,
+    }, timeout=25)
+    r2.raise_for_status()
+    print("[API] 發文成功，Post id =", r2.json().get("id"))
+
+# ---- Main ----
+if __name__ == "__main__":
+    # 0. 自動續命
+    LONG_LIVED_TOKEN = refresh_token(LONG_LIVED_TOKEN)
+
+    # 1. 確認 quota
+    if not quota_ok(LONG_LIVED_TOKEN):
+        sys.exit("[INFO] 今日 quota 用盡，跳過發文")
+
+    # 2. 生成
+    print("=== 生成貼文 ===")
+    post_text = generate_post()
+    print(post_text, "\n")
+
+    # 3. 發布
+    print("=== 發布貼文 ===")
+    post_thread(post_text, LONG_LIVED_TOKEN)
+
+    print("== Done ==")
