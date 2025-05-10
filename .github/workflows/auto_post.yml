@@ -47,6 +47,7 @@ jobs:
       # ④ 跑腳本
       - name: Generate & publish post
         env:
+          GH_PAT:           ${{ secrets.GH_PAT }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           THREADS_USER_ID:  ${{ secrets.THREADS_USER_ID }}
           LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
