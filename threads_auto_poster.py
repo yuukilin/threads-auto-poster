@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# threads_auto_poster.py – DeepSeek 生成 + Threads API 自動發文（快速安全版）
-# ===============================================================
+# threads_auto_poster.py – DeepSeek 生成 + Threads API 自動發文（v1.2）
+# --------------------------------------------------------------
+# 變更：
+# 1. refresh 端點改為 graph.instagram.com/refresh_access_token
+# 2. 400 錯誤（<24h 或已過期）視為「不必續期」而非報錯
+# 3. 續期成功才更新 .env 與 .token_stamp
 
 import os
 import pickle
 import random
 import sqlite3
 import sys
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -16,11 +19,12 @@ import requests
 from dotenv import load_dotenv, set_key
 from sentence_transformers import SentenceTransformer
 
-# ─── 路徑 & 參數 ───────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH  = BASE_DIR / "threads_db.sqlite"
-RECENT_PATH  = BASE_DIR / "recent.pkl"          # 最近 20 筆 id
-ENDINGS_PATH = BASE_DIR / "recent_endings.pkl"  # 最近 10 篇是否問句
+# ─── 基本參數 ──────────────────────────────────────────────
+BASE_DIR  = Path(__file__).resolve().parent
+DB_PATH   = BASE_DIR / "threads_db.sqlite"
+RECENT_PATH  = BASE_DIR / "recent.pkl"
+ENDINGS_PATH = BASE_DIR / "recent_endings.pkl"
+TOKEN_STAMP  = BASE_DIR / ".token_stamp"
 ENV_FILE = BASE_DIR / ".env"
 
 load_dotenv(ENV_FILE)
@@ -32,15 +36,13 @@ DEEPSEEK_MODEL = "deepseek-chat"
 THREADS_USER_ID  = os.getenv("THREADS_USER_ID")
 LONG_LIVED_TOKEN = os.getenv("LONG_LIVED_TOKEN")
 
-# ---- 可選安全：開或關 Quota 檢查 ----
 CHECK_QUOTA = os.getenv("CHECK_THREADS_QUOTA", "0") == "1"
-# ─────────────────────────────────────────────────────────
 
-for var in ("DEEPSEEK_KEY", "THREADS_USER_ID", "LONG_LIVED_TOKEN"):
-    if not globals()[var]:
-        sys.exit(f"[ERROR] 缺少環境變數 {var}")
+for v in ("DEEPSEEK_KEY", "THREADS_USER_ID", "LONG_LIVED_TOKEN"):
+    if not globals()[v]:
+        sys.exit(f"[ERROR] 缺少環境變數 {v}")
 
-# ---- 向量工具 ----
+# ─── 向量工具 ─────────────────────────────────────────────
 sbert = SentenceTransformer("all-MiniLM-L6-v2")
 def cosine(a, b): return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
@@ -50,14 +52,6 @@ def fetch_posts():
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute("SELECT id, content, embedding FROM posts").fetchall()
     return [{"id": rid, "content": cnt, "emb": pickle.loads(emb)} for rid, cnt, emb in rows]
-
-# ---- 範例取樣（保留功能） ----
-def get_examples(k=3):
-    rows = fetch_posts()
-    sample = random.sample(rows, k=min(10, len(rows)))
-    q_vec  = sbert.encode("隨機取樣查詢")
-    scored = [(cosine(q_vec, row["emb"]), row["content"]) for row in sample]
-    return [txt for _, txt in sorted(scored, reverse=True)[:k]]
 
 # ---- 模板抽取 ----
 def pick_template():
@@ -70,11 +64,10 @@ def pick_template():
     return chosen["content"].strip()
 
 # ---- 問號管制 ----
-def ends_q(text): return text.rstrip().endswith(("?", "？"))
+def ends_q(t): return t.rstrip().endswith(("?", "？"))
 def record_q(is_q):
     data = pickle.load(open(ENDINGS_PATH, "rb")) if ENDINGS_PATH.exists() else []
-    data.append(is_q)
-    pickle.dump(data[-10:], open(ENDINGS_PATH, "wb"))
+    data.append(is_q); pickle.dump(data[-10:], open(ENDINGS_PATH, "wb"))
 def too_many_q():
     data = pickle.load(open(ENDINGS_PATH, "rb")) if ENDINGS_PATH.exists() else []
     return len(data) >= 3 and all(data[-3:])
@@ -85,7 +78,7 @@ PROMPT_TEMPLATE = """# Threads 爆文生成器 v5
 任務：**重寫下方 TEMPLATE，生成 1 則全新 Threads 貼文**。
 
 【TEMPLATE】
-{template}
+{tpl}
 【/TEMPLATE】
 
 ── 規格 ──────────────────────────
@@ -110,7 +103,7 @@ def generate_post():
         "model": DEEPSEEK_MODEL,
         "messages": [
             {"role": "system", "content": "你是 Threads 文案助手，只回傳貼文本體。"},
-            {"role": "user",   "content": PROMPT_TEMPLATE.format(template=tpl, lines=target)}
+            {"role": "user",   "content": PROMPT_TEMPLATE.format(tpl=tpl, lines=target)}
         ],
         "max_tokens": 200,
         "temperature": 0.9,
@@ -131,13 +124,12 @@ def generate_post():
     record_q(ends_q(text))
     return text
 
-# ---- Token 續命（距到期 ≤7 天才刷） ----
-REFRESH_URL = "https://graph.threads.net/v1.0/refresh_access_token"
-TOKEN_STAMP = BASE_DIR / ".token_stamp"
+# ---- Token 續命 ----
+REFRESH_URL = "https://graph.instagram.com/refresh_access_token"
 
 def need_refresh() -> bool:
     if not TOKEN_STAMP.exists():
-        return True  # 從未刷新
+        return True
     ts = datetime.fromisoformat(TOKEN_STAMP.read_text().strip())
     return (datetime.now() - ts) > timedelta(days=53)  # 60 - 7
 
@@ -149,6 +141,10 @@ def refresh_token(token: str) -> str:
                          params={"grant_type": "ig_refresh_token",
                                  "access_token": token},
                          timeout=10)
+        if r.status_code == 400:
+            # <24h 或已過期；跳過但不終止
+            print("[INFO] token 尚未到可刷新時間或已失效，跳過續期")
+            return token
         r.raise_for_status()
         new_tok = r.json().get("access_token")
         if new_tok and new_tok != token:
@@ -160,7 +156,7 @@ def refresh_token(token: str) -> str:
         print(f"[WARN] token 續期失敗：{e}")
     return token
 
-# ---- 可選 Quota 檢查 ----
+# ---- 可選 Threads quota 檢查 ----
 def quota_ok(token: str) -> bool:
     if not CHECK_QUOTA:
         return True
@@ -172,23 +168,21 @@ def quota_ok(token: str) -> bool:
         return used < 250
     except Exception as e:
         print(f"[WARN] quota 查詢失敗：{e}")
-        return True  # 查不到就直接貼
+        return True
 
 # ---- 發文 ----
 def post_thread(text: str, token: str):
-    # container
-    url_container = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
-    r1 = requests.post(url_container, data={
-        "media_type":  "TEXT",
-        "text":        text,
+    url_c = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+    r1 = requests.post(url_c, data={
+        "media_type": "TEXT",
+        "text":       text,
         "access_token": token,
     }, timeout=25)
     r1.raise_for_status()
     cid = r1.json().get("id") or sys.exit(f"[ERROR] container 失敗：{r1.text}")
 
-    # publish
-    url_publish = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
-    r2 = requests.post(url_publish, data={
+    url_p = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
+    r2 = requests.post(url_p, data={
         "creation_id":  cid,
         "access_token": token,
     }, timeout=25)
@@ -197,19 +191,15 @@ def post_thread(text: str, token: str):
 
 # ---- Main ----
 if __name__ == "__main__":
-    # 0. 自動續命
     LONG_LIVED_TOKEN = refresh_token(LONG_LIVED_TOKEN)
 
-    # 1. 確認 quota
     if not quota_ok(LONG_LIVED_TOKEN):
         sys.exit("[INFO] 今日 quota 用盡，跳過發文")
 
-    # 2. 生成
     print("=== 生成貼文 ===")
     post_text = generate_post()
     print(post_text, "\n")
 
-    # 3. 發布
     print("=== 發布貼文 ===")
     post_thread(post_text, LONG_LIVED_TOKEN)
 
