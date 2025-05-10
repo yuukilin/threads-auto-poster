@@ -5,6 +5,9 @@ on:
     - cron:  '0 17,20,23,2,5,8,11,14 * * *'   # 台北 1~22 每隔 3 小時
   workflow_dispatch:
 
+permissions:
+  contents: write
+  
 jobs:
   post:
     runs-on: ubuntu-latest
@@ -47,7 +50,7 @@ jobs:
       # ④ 跑腳本
       - name: Generate & publish post
         env:
-          GH_PAT:           ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GITHUB_TOKEN }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           THREADS_USER_ID:  ${{ secrets.THREADS_USER_ID }}
           LONG_LIVED_TOKEN: ${{ secrets.LONG_LIVED_TOKEN }}
