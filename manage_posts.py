@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # manage_posts.py – 勇成專用 Threads 文章匯入工具（CSV ➜ posts.json）
-# 1. 自動偵測編碼（utf-8 / utf-8-sig / big5 / cp950）
-# 2. 產生 SentenceTransformer 向量
-# 3. 同步到 posts.json，可重複執行；跳過重複內容
-
-import os, csv, json, pickle, sqlite3, sys
+# -------------------------------------------------------------
+import os, csv, json, sys
 from typing import Optional, List, Dict
 from datetime import datetime
 from pathlib import Path
@@ -17,15 +14,16 @@ except ImportError:
 from sentence_transformers import SentenceTransformer
 
 # ==== 參數 ====
-BASE_DIR       = Path(__file__).resolve().parent
-CSV_PATH       = BASE_DIR / "posts.csv"
-JSON_PATH      = BASE_DIR / "posts.json"
-EMBED_MODEL    = "all-MiniLM-L6-v2"
-FALLBACK_ENC   = ["utf-8-sig", "utf-8", "big5", "cp950"]
+BASE_DIR    = Path(__file__).resolve().parent
+CSV_PATH    = BASE_DIR / "posts.csv"
+JSON_PATH   = BASE_DIR / "posts.json"
+EMBED_MODEL = "all-MiniLM-L6-v2"
+FALLBACK_ENC = ["utf-8-sig", "utf-8", "big5", "cp950"]
 # ==============
 
 def detect_encoding(path: Path) -> Optional[str]:
-    if not chardet: return None
+    if not chardet:
+        return None
     with path.open("rb") as fh:
         raw = fh.read(8192)
     enc = chardet.detect(raw).get("encoding")
@@ -66,8 +64,15 @@ def load_json(path: Path) -> List[Dict]:
     return []
 
 def save_json(path: Path, data: List[Dict]):
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    try:
+        # 確保檔案存在（避免權限問題）
+        if not path.exists():
+            path.touch(mode=0o644, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except PermissionError as e:
+        sys.exit(f"[ERROR] 無法寫入 {path}：{e}\n"
+                 f"請確認目錄權限，或執行：chmod -R u+rw {path.parent}")
 
 def main():
     print("== 開始同步 posts.csv ➜ posts.json ==")
@@ -78,11 +83,11 @@ def main():
     if rdr is None:
         sys.exit(1)
 
-    model      = SentenceTransformer(EMBED_MODEL)
-    json_data  = load_json(JSON_PATH)
-    existing   = {item["content"]: item for item in json_data}
-    next_id    = max((item["id"] for item in json_data), default=0) + 1
-    inserted   = skipped = 0
+    model = SentenceTransformer(EMBED_MODEL)
+    json_data = load_json(JSON_PATH)
+    existing  = {item["content"]: item for item in json_data}
+    next_id   = max((item["id"] for item in json_data), default=0) + 1
+    inserted = skipped = 0
 
     for i, row in enumerate(rdr, 1):
         content = (row.get("content") or "").strip()
@@ -92,9 +97,9 @@ def main():
             skipped += 1; continue
         emb = model.encode(content).tolist()
         json_data.append({
-            "id":        next_id,
-            "content":   content,
-            "embedding": emb,
+            "id":         next_id,
+            "content":    content,
+            "embedding":  emb,
             "created_at": datetime.now().isoformat(timespec="seconds")
         })
         next_id  += 1
@@ -104,12 +109,10 @@ def main():
     fh.close()
 
     print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆")
-    print("== 同步完成 ==")
     if inserted:
         print("最新五筆：")
         for item in json_data[-5:]:
-            preview = item["content"].replace("\n", " ")[:60]
-            print(f"{item['id']:>5} │ {preview}")
+            print(f"{item['id']:>5} │ {item['content'].replace(chr(10), ' ')[:60]}")
 
 if __name__ == "__main__":
     main()
