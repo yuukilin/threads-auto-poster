@@ -1,50 +1,43 @@
 #!/usr/bin/env python3
-# manage_posts.py  –  勇成專用 Threads 文章匯入工具
+# manage_posts.py – 勇成專用 Threads 文章匯入工具（CSV ➜ posts.json）
+# 1. 自動偵測編碼（utf-8 / utf-8-sig / big5 / cp950）
+# 2. 產生 SentenceTransformer 向量
+# 3. 同步到 posts.json，可重複執行；跳過重複內容
 
-import os, csv, pickle, sqlite3
-from typing import Optional
+import os, csv, json, pickle, sqlite3, sys
+from typing import Optional, List, Dict
+from datetime import datetime
+from pathlib import Path
+
 try:
     import chardet
 except ImportError:
     chardet = None
+
 from sentence_transformers import SentenceTransformer
 
-# ===== 參數 ===== #
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))       # ← 固定路徑
-DB_PATH  = os.path.join(BASE_DIR, "threads_db.sqlite")
-CSV_PATH = os.path.join(BASE_DIR, "posts.csv")
-EMBED_MODEL = "all-MiniLM-L6-v2"
-FALLBACK_ENCODINGS = ["utf-8-sig", "big5", "cp950", "utf-8"]
-# ================= #
+# ==== 參數 ====
+BASE_DIR       = Path(__file__).resolve().parent
+CSV_PATH       = BASE_DIR / "posts.csv"
+JSON_PATH      = BASE_DIR / "posts.json"
+EMBED_MODEL    = "all-MiniLM-L6-v2"
+FALLBACK_ENC   = ["utf-8-sig", "utf-8", "big5", "cp950"]
+# ==============
 
-def detect_encoding(path: str) -> Optional[str]:
-    if chardet:
-        with open(path, "rb") as fh:
-            raw = fh.read(8192)
-        enc = chardet.detect(raw).get("encoding")
-        if enc:
-            return enc.lower()
+def detect_encoding(path: Path) -> Optional[str]:
+    if not chardet: return None
+    with path.open("rb") as fh:
+        raw = fh.read(8192)
+    enc = chardet.detect(raw).get("encoding")
+    return enc.lower() if enc else None
 
-def initialize_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT NOT NULL UNIQUE,
-            embedding BLOB NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );""")
-
-def embed_text(model, text):  # -> bytes
-    return pickle.dumps(model.encode(text))
-
-def open_csv(path: str):
+def open_csv(path: Path):
     tried = []
     enc = detect_encoding(path)
     if enc:
         tried.append(enc)
         try:
-            fh = open(path, newline="", encoding=enc)
+            fh = path.open(newline="", encoding=enc)
             rdr = csv.DictReader(fh)
             if rdr.fieldnames and "content" in rdr.fieldnames:
                 print(f"[CSV] 偵測編碼：{enc}")
@@ -52,10 +45,10 @@ def open_csv(path: str):
             fh.close()
         except UnicodeDecodeError:
             pass
-    for enc in FALLBACK_ENCODINGS:
+    for enc in FALLBACK_ENC:
         if enc in tried: continue
         try:
-            fh = open(path, newline="", encoding=enc)
+            fh = path.open(newline="", encoding=enc)
             rdr = csv.DictReader(fh)
             if rdr.fieldnames and "content" in rdr.fieldnames:
                 print(f"[CSV] 使用備援編碼：{enc}")
@@ -63,52 +56,60 @@ def open_csv(path: str):
             fh.close()
         except UnicodeDecodeError:
             continue
-    print(f"[ERROR] 無法判斷 {path} 的正確編碼。")
+    print(f"[ERROR] 無法判斷 {path} 編碼")
     return None, None
 
-def import_from_csv():
-    if not os.path.isfile(CSV_PATH):
-        print(f"[ERROR] 找不到 {CSV_PATH}")
-        return
-    fh, rdr = open_csv(CSV_PATH)
-    if rdr is None: return
+def load_json(path: Path) -> List[Dict]:
+    if path.is_file():
+        with path.open(encoding="utf-8") as fh:
+            return json.load(fh)
+    return []
 
-    model = SentenceTransformer(EMBED_MODEL)
-    inserted = skipped = 0
-
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        for i, row in enumerate(rdr, 1):
-            content = (row.get("content") or "").strip()
-            if not content:
-                print(f"[WARN] 第 {i} 行空白，跳過。"); continue
-            if cur.execute("SELECT 1 FROM posts WHERE content = ?", (content,)).fetchone():
-                skipped += 1; continue
-            try:
-                cur.execute("INSERT INTO posts (content, embedding) VALUES (?, ?)",
-                            (content, embed_text(model, content)))
-                inserted += 1
-            except Exception as e:
-                print(f"[ERROR] 第 {i} 行匯入失敗：{e}")
-        conn.commit()                               # ← 手動保險 commit
-
-    fh.close()
-    print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆。")
-
-def show_last_five():
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT id, content FROM posts ORDER BY id DESC LIMIT 5").fetchall()
-    print("\n[CHECK] 最後 5 筆貼文：")
-    for rid, txt in reversed(rows):
-        print(f"{rid:>5} │ {txt.replace(chr(10), ' ')[:60]}")
+def save_json(path: Path, data: List[Dict]):
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
 
 def main():
-    print("== 開始同步 posts.csv → SQLite ==")
-    initialize_db()
-    import_from_csv()
-    show_last_five()
+    print("== 開始同步 posts.csv ➜ posts.json ==")
+    if not CSV_PATH.is_file():
+        sys.exit(f"[ERROR] 找不到 {CSV_PATH}")
+
+    fh, rdr = open_csv(CSV_PATH)
+    if rdr is None:
+        sys.exit(1)
+
+    model      = SentenceTransformer(EMBED_MODEL)
+    json_data  = load_json(JSON_PATH)
+    existing   = {item["content"]: item for item in json_data}
+    next_id    = max((item["id"] for item in json_data), default=0) + 1
+    inserted   = skipped = 0
+
+    for i, row in enumerate(rdr, 1):
+        content = (row.get("content") or "").strip()
+        if not content:
+            print(f"[WARN] 第 {i} 行空白，跳過"); continue
+        if content in existing:
+            skipped += 1; continue
+        emb = model.encode(content).tolist()
+        json_data.append({
+            "id":        next_id,
+            "content":   content,
+            "embedding": emb,
+            "created_at": datetime.now().isoformat(timespec="seconds")
+        })
+        next_id  += 1
+        inserted += 1
+
+    save_json(JSON_PATH, json_data)
+    fh.close()
+
+    print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆")
     print("== 同步完成 ==")
+    if inserted:
+        print("最新五筆：")
+        for item in json_data[-5:]:
+            preview = item["content"].replace("\n", " ")[:60]
+            print(f"{item['id']:>5} │ {preview}")
 
 if __name__ == "__main__":
     main()
