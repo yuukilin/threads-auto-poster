@@ -1,97 +1,77 @@
 #!/usr/bin/env python3
-# manage_posts.py – 勇成專用 Threads 文章匯入工具（CSV ➜ SQLite）
+# manage_posts.py – CSV ➜ SQLite，支援「行內混編碼」，自動建表
 # ===============================================================
 
 import csv
+import io
 import pickle
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
-try:
-    import chardet
-except ImportError:
-    chardet = None
+from typing import List
 
 from sentence_transformers import SentenceTransformer
 
-# ─── 檔案路徑 ────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / "posts.csv"
-DB_PATH  = BASE_DIR / "threads_db.sqlite"
+# ── 常數 ────────────────────────────────────────────────
+BASE_DIR   = Path(__file__).resolve().parent
+CSV_PATH   = BASE_DIR / "posts.csv"
+DB_PATH    = BASE_DIR / "threads_db.sqlite"
 EMBED_MODEL = "all-MiniLM-L6-v2"
-
-FALLBACK_ENC = ["utf-8-sig", "utf-8", "big5", "cp950"]
-# ──────────────────────────────────────────────────────────
-
-
-# ---------- 工具 ---------- #
-def detect_encoding(path: Path) -> Optional[str]:
-    if not chardet:
-        return None
-    with path.open("rb") as fh:
-        raw = fh.read(8192)
-    enc = chardet.detect(raw).get("encoding")
-    return enc.lower() if enc else None
+ENCODINGS  = ["utf-8-sig", "utf-8", "big5", "cp950"]
+# ──────────────────────────────────────────────────────
 
 
-def open_csv(path: Path):
-    tried = []
-    enc = detect_encoding(path)
-    if enc:
-        tried.append(enc)
-        try:
-            fh = path.open(newline="", encoding=enc)
-            rdr = csv.DictReader(fh)
-            if rdr.fieldnames and "content" in rdr.fieldnames:
-                print(f"[CSV] 偵測編碼：{enc}")
-                return fh, rdr
-            fh.close()
-        except UnicodeDecodeError:
-            pass
-    for enc in FALLBACK_ENC:
-        if enc in tried:
-            continue
-        try:
-            fh = path.open(newline="", encoding=enc)
-            rdr = csv.DictReader(fh)
-            if rdr.fieldnames and "content" in rdr.fieldnames:
-                print(f"[CSV] 使用備援編碼：{enc}")
-                return fh, rdr
-            fh.close()
-        except UnicodeDecodeError:
-            continue
-    print(f"[ERROR] 無法判斷 {path} 編碼")
-    return None, None
-
-
-def init_db():
+def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content   TEXT NOT NULL UNIQUE,
-                embedding BLOB NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            """
+            """CREATE TABLE IF NOT EXISTS posts (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 content    TEXT    NOT NULL UNIQUE,
+                 embedding  BLOB    NOT NULL,
+                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+               );"""
         )
 
 
-# ---------- 主流程 ---------- #
+def decode_line(line_bytes: bytes) -> str | None:
+    """嘗試用多種編碼解 1 行；失敗回傳 None"""
+    for enc in ENCODINGS:
+        try:
+            return line_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def load_csv_mixed(path: Path) -> List[str]:
+    """回傳解完碼的整行清單（含 header）"""
+    decoded_lines = []
+    with path.open("rb") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            txt = decode_line(raw)
+            if txt is None:
+                print(f"[WARN] 第 {lineno} 行解碼失敗，已跳過")
+                continue
+            decoded_lines.append(txt)
+    if not decoded_lines:
+        sys.exit("[ERROR] CSV 全部行都解碼失敗")
+    return decoded_lines
+
+
 def main():
     if not CSV_PATH.is_file():
         sys.exit(f"[ERROR] 找不到 {CSV_PATH}")
 
-    fh, rdr = open_csv(CSV_PATH)
-    if rdr is None:
-        sys.exit(1)
-
-    print("== 讀取 CSV，匯入 DB ==")
+    init_db()  # ← 保證先建表
     model = SentenceTransformer(EMBED_MODEL)
+
+    print("== 讀取 CSV（混編碼模式） ==")
+    decoded_lines = load_csv_mixed(CSV_PATH)
+
+    rdr = csv.DictReader(io.StringIO("".join(decoded_lines)))
+    if "content" not in rdr.fieldnames:
+        sys.exit("[ERROR] CSV 必須有 content 欄")
 
     inserted = skipped = 0
     with sqlite3.connect(DB_PATH) as conn:
@@ -107,18 +87,15 @@ def main():
                 skipped += 1
                 continue
 
-            emb = pickle.dumps(model.encode(content))
+            emb_blob = pickle.dumps(model.encode(content))
             cur.execute(
                 "INSERT INTO posts (content, embedding) VALUES (?, ?)",
-                (content, emb),
+                (content, emb_blob),
             )
             inserted += 1
         conn.commit()
 
-    fh.close()
     print(f"[RESULT] 新增 {inserted} 筆，跳過 {skipped} 筆")
-
-    # 顯示最後 5 筆
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT id, content FROM posts ORDER BY id DESC LIMIT 5"
