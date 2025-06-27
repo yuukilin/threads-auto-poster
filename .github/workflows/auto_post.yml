@@ -2,52 +2,45 @@ name: Auto Post Threads
 
 on:
   schedule:
-    - cron:  '0 17,20,23,2,5,8,11,14 * * *'   # 台北 1~22 每隔 3 小時
+    - cron: '0 17,20,23,2,5,8,11,14 * * *'   # 台北 1~22 每隔 3 小時
   workflow_dispatch:
 
 permissions:
   contents: write
-  
+
 jobs:
   post:
     runs-on: ubuntu-latest
     env:
-      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu   # Torch CPU 版輪子
 
     steps:
       - uses: actions/checkout@v3
 
-      # === (NEW) 還原 DB cache ============================================
+      # ── 還原 DB cache（保留）──────────────────────────────────────────
       - name: Restore DB cache
         id: db-cache
         uses: actions/cache@v3
         with:
           path: threads_db.sqlite
-          key: db-${{ runner.os }}-latest      # 每次覆寫；下次就能拉到
-      # =====================================================================
+          key: db-${{ runner.os }}-latest
+      # ────────────────────────────────────────────────────────────────
 
-      # ① 裝 Python
+      # ① 安裝 Python，開啟 pip 快取
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: 'pip'            # 自動快取依賴，不必手動存 .venv
 
-      # ② 還原 virtualenv
-      - name: Restore .venv cache
-        id: venv-cache
-        uses: actions/cache@v3
-        with:
-          path: .venv
-          key: ${{ runner.os }}-venv-${{ hashFiles('requirements.txt') }}
-
-      # ③ cache miss 時才建 venv
-      - name: Install dependencies (only on cache miss)
-        if: steps.venv-cache.outputs.cache-hit != 'true'
+      # ② 安裝／升級相依套件（每次都跑，確保最新）
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           python -m venv .venv
           . .venv/bin/activate
-          pip install -r requirements.txt --progress-bar off
+          pip install --upgrade -r requirements.txt --progress-bar off
 
-      # ④ 跑腳本
+      # ③ 執行貼文腳本
       - name: Generate & publish post
         env:
           GH_PAT: ${{ secrets.GITHUB_TOKEN }}
@@ -59,12 +52,11 @@ jobs:
           python manage_posts.py
           python threads_auto_poster.py
 
-      # === (NEW) 儲存最新 DB 到 cache =====================================
+      # ── 儲存最新 DB（保留）──────────────────────────────────────────
       - name: Save DB cache
         if: always()
         uses: actions/cache@v3
         with:
           path: threads_db.sqlite
-          key: db-${{ runner.os }}-latest      # 覆寫同一 key，確保最新
-          # 不需 restore-keys；上面 Restore 已指定同 key
-      # =====================================================================
+          key: db-${{ runner.os }}-latest
+      # ────────────────────────────────────────────────────────────────
