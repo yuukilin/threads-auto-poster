@@ -178,6 +178,7 @@ def post_thread(text: str, token: str):
         "text":       text,
         "access_token": token,
     }, timeout=25)
+    print("DEBUG>", r1.status_code, r1.text)
     r1.raise_for_status()
     cid = r1.json().get("id") or sys.exit(f"[ERROR] container 失敗：{r1.text}")
 
