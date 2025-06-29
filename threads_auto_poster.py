@@ -190,7 +190,7 @@ def post_thread(text: str, token: str):
 
 # ---- Main ----
 if __name__ == "__main__":
-    LONG_LIVED_TOKEN = refresh_token(LONG_LIVED_TOKEN)
+    LONG_LIVED_TOKEN = refresh_long_token(LONG_LIVED_TOKEN)
 
     if not quota_ok(LONG_LIVED_TOKEN):
         sys.exit("[INFO] 今日 quota 用盡，跳過發文")
