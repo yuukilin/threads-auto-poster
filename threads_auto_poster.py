@@ -125,36 +125,34 @@ def generate_post():
     return text
 
 # ---- Token 續命 ----
-REFRESH_URL = "https://graph.instagram.com/refresh_access_token"
+# ------------ 新增：先嘗試 refresh 長效 token -----------------
+def refresh_long_token(token: str) -> str | None:
+    url = "https://graph.threads.net/refresh_access_token"
+    params = {"grant_type": "th_refresh_token", "access_token": token}
+    r = requests.get(url, params=params, timeout=30)
+    if r.status_code == 400:
+        # 400 但非 token 過期會寫在 r.json()["error"]["code"]
+        return None
+    r.raise_for_status()
+    data = r.json()
+    new_token = data["access_token"]
+    expires = int(data.get("expires_in", 0))
+    print(f"[TOKEN] refreshed, new TTL {expires//86400} 天")
+    return new_token
+# -------------------------------------------------------------
 
-def need_refresh() -> bool:
-    if not TOKEN_STAMP.exists():
-        return True
-    ts = datetime.fromisoformat(TOKEN_STAMP.read_text().strip())
-    return (datetime.now() - ts) > timedelta(days=53)  # 60 - 7
+def post_thread(post_text: str, token: str) -> None:
+    # 先嘗試續期，成功就用新 token
+    token = refresh_long_token(token) or token
 
-def refresh_token(token: str) -> str:
-    if not need_refresh():
-        return token
-    try:
-        r = requests.get(REFRESH_URL,
-                         params={"grant_type": "ig_refresh_token",
-                                 "access_token": token},
-                         timeout=10)
-        if r.status_code == 400:
-            # <24h 或已過期；跳過但不終止
-            print("[INFO] token 尚未到可刷新時間或已失效，跳過續期")
-            return token
-        r.raise_for_status()
-        new_tok = r.json().get("access_token")
-        if new_tok and new_tok != token:
-            set_key(ENV_FILE, "LONG_LIVED_TOKEN", new_tok)
-            TOKEN_STAMP.write_text(datetime.now().isoformat(timespec="seconds"))
-            print("[TOKEN] 已自動續期 +60 天")
-            return new_tok
-    except Exception as e:
-        print(f"[WARN] token 續期失敗：{e}")
-    return token
+    url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+    payload = {"text": post_text}
+    r1 = requests.post(url, data=payload, params={"access_token": token}, timeout=30)
+    # 若再炸 190（過期），就直接把錯誤印出來，方便你手動換 token
+    if r1.status_code == 400 and r1.json().get("error", {}).get("code") == 190:
+        raise RuntimeError("長效 token 已失效，請手動重新產生並更新 GitHub Secrets")
+    r1.raise_for_status()
+    print("[THREADS] 發布成功", r1.json())
 
 # ---- 可選 Threads quota 檢查 ----
 def quota_ok(token: str) -> bool:
