@@ -1,3 +1,13 @@
 .venv/
+.local/
 __pycache__/
-!threads_db.sqlite   # 這行很重要，確保 DB 會被追蹤
+.env
+.env.*
+*.token
+*.sqlite
+*.pkl
+.token_stamp
+drafts/
+*.log
+*.err
+.DS_Store
