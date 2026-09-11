@@ -17,6 +17,11 @@ if [[ ! -f "$source_file" || ! -x /usr/bin/clang ]]; then
 fi
 
 mkdir -p "$target_dir"
+if [[ -x "$target_file" && "$target_file" -nt "$source_file" && "$target_file" -nt "$0" ]]; then
+  echo "ready: $target_file"
+  exit 0
+fi
+
 temporary="$(mktemp "${target_dir}/keychain_update.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 

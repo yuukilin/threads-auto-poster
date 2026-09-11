@@ -14,4 +14,5 @@ fi
 
 "${script_dir}/build_keychain_helper.sh"
 "$helper" prompt-update "$account" "$service" "Threads API token - lin.yusei"
+"$helper" trust "$account" "$service" "Threads API token - lin.yusei"
 echo "saved: macOS Keychain service=${service}, account=${account}"

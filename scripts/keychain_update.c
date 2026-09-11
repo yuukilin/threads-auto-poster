@@ -79,12 +79,14 @@ static size_t prompt_for_token(unsigned char *buffer, size_t capacity) {
 int main(int argc, char **argv) {
     const bool is_update = argc == 5 && strcmp(argv[1], "update") == 0;
     const bool is_prompt = argc == 5 && strcmp(argv[1], "prompt-update") == 0;
+    const bool is_trust = argc == 5 && strcmp(argv[1], "trust") == 0;
     const bool is_read = argc == 4 && strcmp(argv[1], "read") == 0;
     const bool is_delete = argc == 4 && strcmp(argv[1], "delete") == 0;
-    if (!is_update && !is_prompt && !is_read && !is_delete) {
+    if (!is_update && !is_prompt && !is_trust && !is_read && !is_delete) {
         fputs(
             "usage: keychain_update update ACCOUNT SERVICE LABEL\n"
             "       keychain_update prompt-update ACCOUNT SERVICE LABEL\n"
+            "       keychain_update trust ACCOUNT SERVICE LABEL\n"
             "       keychain_update read ACCOUNT SERVICE\n"
             "       keychain_update delete ACCOUNT SERVICE\n",
             stderr
@@ -98,16 +100,49 @@ int main(int argc, char **argv) {
     size_t token_length = 0;
     CFStringRef account = make_string(argv[2]);
     CFStringRef service = make_string(argv[3]);
-    CFStringRef label = (is_update || is_prompt) ? make_string(argv[4]) : NULL;
+    CFStringRef label =
+        (is_update || is_prompt || is_trust) ? make_string(argv[4]) : NULL;
     CFDataRef token_data = NULL;
     CFMutableDictionaryRef query = NULL;
+    CFTypeRef item_ref = NULL;
+    SecTrustedApplicationRef self_app = NULL;
+    CFArrayRef trusted_apps = NULL;
+    SecAccessRef access = NULL;
 
     if (account == NULL || service == NULL ||
-        ((is_update || is_prompt) && label == NULL)) {
+        ((is_update || is_prompt || is_trust) && label == NULL)) {
         goto cleanup;
     }
     query = make_query(account, service);
     if (query == NULL) goto cleanup;
+
+    if (is_trust) {
+        CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
+        CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+        status = SecItemCopyMatching(query, &item_ref);
+        if (status != errSecSuccess || item_ref == NULL) goto cleanup;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        status = SecTrustedApplicationCreateFromPath(NULL, &self_app);
+        if (status != errSecSuccess || self_app == NULL) goto cleanup;
+
+        const void *applications[] = {self_app};
+        trusted_apps = CFArrayCreate(
+            kCFAllocatorDefault,
+            applications,
+            1,
+            &kCFTypeArrayCallBacks
+        );
+        if (trusted_apps == NULL) goto cleanup;
+        status = SecAccessCreate(label, trusted_apps, &access);
+        if (status != errSecSuccess || access == NULL) goto cleanup;
+        status = SecKeychainItemSetAccess((SecKeychainItemRef)item_ref, access);
+#pragma clang diagnostic pop
+
+        exit_code = status == errSecSuccess ? 0 : 1;
+        goto cleanup;
+    }
 
     if (is_read) {
         CFTypeRef result = NULL;
@@ -177,6 +212,10 @@ cleanup:
         fprintf(stderr, "keychain operation failed (%d)\n", (int)status);
     }
     if (query != NULL) CFRelease(query);
+    if (access != NULL) CFRelease(access);
+    if (trusted_apps != NULL) CFRelease(trusted_apps);
+    if (self_app != NULL) CFRelease(self_app);
+    if (item_ref != NULL) CFRelease(item_ref);
     if (token_data != NULL) CFRelease(token_data);
     if (label != NULL) CFRelease(label);
     if (service != NULL) CFRelease(service);
