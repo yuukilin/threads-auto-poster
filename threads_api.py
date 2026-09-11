@@ -370,6 +370,17 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (ThreadsApiError, OSError) as error:
+        if args.command == "refresh":
+            try:
+                _write_refresh_state(
+                    {
+                        "ok": False,
+                        "failed_at": datetime.now(timezone.utc).isoformat(),
+                        "error": str(error),
+                    }
+                )
+            except OSError:
+                pass
         print(f"錯誤：{error}", file=sys.stderr)
         return 1
 

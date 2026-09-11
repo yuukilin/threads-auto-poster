@@ -1,4 +1,7 @@
+import sys
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -105,6 +108,24 @@ class ThreadsApiTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertNotIn(token, command)
         self.assertEqual(run.call_args.kwargs["input"], token.encode("utf-8"))
+
+    def test_refresh_failure_is_written_to_status_file(self):
+        with (
+            patch.object(sys, "argv", ["threads_api.py", "refresh"]),
+            patch.object(
+                threads_api,
+                "refresh_access_token",
+                side_effect=threads_api.ThreadsApiError("invalid token"),
+            ),
+            patch.object(threads_api, "_write_refresh_state") as write_state,
+            redirect_stderr(StringIO()),
+        ):
+            self.assertEqual(threads_api.main(), 1)
+
+        state = write_state.call_args.args[0]
+        self.assertFalse(state["ok"])
+        self.assertEqual(state["error"], "invalid token")
+        self.assertIn("failed_at", state)
 
 
 if __name__ == "__main__":
