@@ -48,43 +48,23 @@ class ThreadsApiError(RuntimeError):
 
 
 def load_access_token() -> str:
-    if KEYCHAIN_UPDATE_HELPER.is_file():
-        try:
-            native_result = subprocess.run(
-                [
-                    str(KEYCHAIN_UPDATE_HELPER),
-                    "read",
-                    KEYCHAIN_ACCOUNT,
-                    KEYCHAIN_SERVICE,
-                ],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
-            if native_result.returncode == 0 and native_result.stdout:
-                return native_result.stdout.decode("utf-8").strip()
-        except subprocess.TimeoutExpired:
-            pass
-
+    if not KEYCHAIN_UPDATE_HELPER.is_file():
+        raise ThreadsApiError("缺少 Mac 鑰匙圈安全讀取程式。")
     try:
         result = subprocess.run(
             [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-a",
+                str(KEYCHAIN_UPDATE_HELPER),
+                "read",
                 KEYCHAIN_ACCOUNT,
-                "-s",
                 KEYCHAIN_SERVICE,
-                "-w",
             ],
             check=False,
             capture_output=True,
-            text=True,
             timeout=10,
         )
     except subprocess.TimeoutExpired:
         raise ThreadsApiError("讀取 Mac 鑰匙圈逾時。") from None
-    token = result.stdout.strip()
+    token = result.stdout.decode("utf-8").strip()
     if result.returncode != 0 or not token:
         raise ThreadsApiError("找不到 Threads 權杖，請先將它存入 Mac 鑰匙圈。")
     return token

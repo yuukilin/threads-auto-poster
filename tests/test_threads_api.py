@@ -33,6 +33,37 @@ class ThreadsApiTests(unittest.TestCase):
         with self.assertRaisesRegex(threads_api.ThreadsApiError, "500 字元上限"):
             threads_api.validate_text("字" * 501)
 
+    def test_keychain_read_uses_only_fixed_native_helper(self):
+        token = "sensitive-token-value"
+        with (
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(
+                threads_api.subprocess,
+                "run",
+                return_value=CompletedProcess([], 0, stdout=token.encode("utf-8")),
+            ) as run,
+        ):
+            self.assertEqual(threads_api.load_access_token(), token)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], str(threads_api.KEYCHAIN_UPDATE_HELPER))
+        self.assertNotIn("/usr/bin/security", command)
+
+    def test_keychain_read_does_not_fallback_to_security(self):
+        with (
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(
+                threads_api.subprocess,
+                "run",
+                return_value=CompletedProcess([], 1, stdout=b""),
+            ) as run,
+        ):
+            with self.assertRaisesRegex(threads_api.ThreadsApiError, "找不到"):
+                threads_api.load_access_token()
+
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("/usr/bin/security", run.call_args.args[0])
+
     def test_publish_checks_account_and_uses_two_step_api(self):
         responses = [
             {"id": "user-1", "username": "lin.yusei"},
