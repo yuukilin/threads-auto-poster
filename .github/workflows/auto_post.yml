@@ -6,11 +6,17 @@ on:
     branches: [main]
     paths:
       - "threads_api.py"
+      - "draft_workflow.py"
+      - "AUTOMATION_PROMPT.md"
+      - "STYLE_GUIDE.md"
       - "tests/**"
       - ".github/workflows/auto_post.yml"
   pull_request:
     paths:
       - "threads_api.py"
+      - "draft_workflow.py"
+      - "AUTOMATION_PROMPT.md"
+      - "STYLE_GUIDE.md"
       - "tests/**"
       - ".github/workflows/auto_post.yml"
 
@@ -27,6 +33,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile
-        run: python -m py_compile threads_api.py
+        run: python -m py_compile threads_api.py draft_workflow.py
       - name: Test
         run: python -m unittest discover -s tests -v
