@@ -70,6 +70,16 @@ class DailyRecoveryTests(unittest.TestCase):
         self.delivery("草稿已完成")
         self.assertEqual(self.check()["action"], "deliver_saved_draft")
 
+    def test_writing_widget_alone_requires_plain_text_redelivery(self):
+        self.draft()
+        self.delivery(':::writing{variant="social_post" id="12345"}\n當天完整草稿。\n:::\n尚未發布')
+        self.assertEqual(self.check()["action"], "deliver_saved_draft")
+
+    def test_plain_text_after_widget_is_recorded(self):
+        self.draft()
+        self.delivery(':::writing{variant="social_post" id="12345"}\n當天完整草稿。\n:::\n\n當天完整草稿。\n尚未發布')
+        self.assertEqual(self.check()["action"], "skip_delivered")
+
     def test_running_turn_is_not_completed_delivery(self):
         self.draft()
         self.delivery("當天完整草稿。", status="inProgress")

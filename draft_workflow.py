@@ -27,7 +27,7 @@ def report_date(text: str) -> str | None:
 
 
 def find_delivery(codex_home: Path, thread_id: str, body: str, day: date) -> dict:
-    """Require an exact body in a completed final answer in the requested history."""
+    """Check plain-text final output; this is a record check, not a read receipt."""
     state_path = codex_home / "state_5.sqlite"
     history_path = codex_home / "thread_history_1.sqlite"
     if not state_path.is_file() or not history_path.is_file():
@@ -55,8 +55,16 @@ def find_delivery(codex_home: Path, thread_id: str, body: str, day: date) -> dic
             for raw, turn_id, completed in rows:
                 item = json.loads(raw)
                 text = item.get("text", "").replace("\r\n", "\n")
-                if body in text:
+                # An editable writing widget can exist in storage without its
+                # contents appearing in ordinary chat. Require the body outside
+                # such widgets so retries can recover the user's missing draft.
+                plain_text = re.sub(
+                    r"^:::writing\b[^\n]*\n.*?^:::[ \t]*(?:\n|$)",
+                    "", text, flags=re.M | re.S,
+                )
+                if body in plain_text:
                     return {"verified": True, "turn_id": turn_id, "item_id": item["id"],
+                            "evidence_type": "plain_text_final_record_not_user_read_receipt",
                             "completed_at": datetime.fromtimestamp(completed, TAIPEI).isoformat()}
         return {"verified": False, "reason": "full_draft_not_in_completed_final"}
     except (sqlite3.Error, ValueError, OSError) as error:
